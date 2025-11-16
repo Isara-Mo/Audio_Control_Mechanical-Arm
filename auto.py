@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # coding=utf-8
 """
-语音控制机械臂系统
-整合语音识别、大模型理解和机械臂控制
+语音控制机械臂系统 - 改进版
+使用预定义动作命令，简化模型理解过程
 """
 
 import websocket
@@ -22,6 +22,7 @@ from openai import OpenAI
 from Arm_Lib import Arm_Device
 import threading
 import queue
+import re
 
 class VoiceControlledArm:
     def __init__(self):
@@ -37,7 +38,7 @@ class VoiceControlledArm:
         
         # 初始化OpenAI客户端
         self.client = OpenAI(
-            api_key="sk-029607f5bc9a4e15864e1e1a302d152b", 
+            api_key="", 
             base_url="https://api.deepseek.com"
         )
         
@@ -57,6 +58,56 @@ class VoiceControlledArm:
             "放置红色": [117, 19, 66, 56, 270],
             "放置绿色": [136, 66, 20, 29, 270],
             "放置蓝色": [44, 66, 20, 28, 270],
+        }
+        
+        # 预定义动作命令集
+        self.action_commands = {
+            # 基础动作
+            "初始化": self.action_init,
+            "复位": self.action_init,
+            "重置": self.action_init,
+            
+            "准备": self.action_ready,
+            "待机": self.action_ready,
+            
+            "抓取": self.action_grab,
+            "夹取": self.action_grab,
+            "夹住": self.action_grab,
+            
+            "松开": self.action_release,
+            "放开": self.action_release,
+            "释放": self.action_release,
+            
+            "向上": self.action_move_up,
+            "上升": self.action_move_up,
+            "升高": self.action_move_up,
+            
+            # 颜色分类动作
+            "黄色": self.action_place_yellow,
+            "放黄色": self.action_place_yellow,
+            "黄色区域": self.action_place_yellow,
+            
+            "红色": self.action_place_red,
+            "放红色": self.action_place_red,
+            "红色区域": self.action_place_red,
+            
+            "绿色": self.action_place_green,
+            "放绿色": self.action_place_green,
+            "绿色区域": self.action_place_green,
+            
+            "蓝色": self.action_place_blue,
+            "放蓝色": self.action_place_blue,
+            "蓝色区域": self.action_place_blue,
+            
+            # 组合动作
+            "完整抓取": self.action_full_grab_sequence,
+            "抓取流程": self.action_full_grab_sequence,
+            "执行抓取": self.action_full_grab_sequence,
+            
+            "分拣黄色": self.action_sort_yellow,
+            "分拣红色": self.action_sort_red,
+            "分拣绿色": self.action_sort_green,
+            "分拣蓝色": self.action_sort_blue,
         }
         
         # 初始化机械臂位置
@@ -96,7 +147,96 @@ class VoiceControlledArm:
         self.arm.Arm_serial_servo_write(2, 90, 1500)
         self.arm.Arm_serial_servo_write(3, 90, 1500)
         self.arm.Arm_serial_servo_write(4, 90, 1500)
-        time.sleep(0.1)
+        time.sleep(1.5)
+
+    # 预定义动作命令
+    def action_init(self):
+        """初始化动作"""
+        print("执行初始化动作")
+        self.arm_clamp_block(0)
+        self.arm_move(self.positions["初始位置"], 1000)
+
+    def action_ready(self):
+        """准备动作"""
+        print("执行准备动作")
+        self.arm_move(self.positions["准备位置"], 1000)
+
+    def action_grab(self):
+        """抓取动作"""
+        print("执行抓取动作")
+        self.arm_move(self.positions["抓取位置"], 1000)
+        self.arm_clamp_block(1)
+
+    def action_release(self):
+        """释放动作"""
+        print("执行释放动作")
+        self.arm_clamp_block(0)
+
+    def action_move_up(self):
+        """向上移动动作"""
+        print("执行向上移动动作")
+        self.arm_move_up()
+
+    def action_place_yellow(self):
+        """放置到黄色区域"""
+        print("执行放置黄色动作")
+        self.arm_move(self.positions["放置黄色"], 1000)
+
+    def action_place_red(self):
+        """放置到红色区域"""
+        print("执行放置红色动作")
+        self.arm_move(self.positions["放置红色"], 1000)
+
+    def action_place_green(self):
+        """放置到绿色区域"""
+        print("执行放置绿色动作")
+        self.arm_move(self.positions["放置绿色"], 1000)
+
+    def action_place_blue(self):
+        """放置到蓝色区域"""
+        print("执行放置蓝色动作")
+        self.arm_move(self.positions["放置蓝色"], 1000)
+
+    def action_full_grab_sequence(self):
+        """完整的抓取序列"""
+        print("执行完整抓取序列")
+        self.action_ready()
+        time.sleep(0.5)
+        self.action_grab()
+        time.sleep(0.5)
+        self.action_move_up()
+
+    def action_sort_yellow(self):
+        """分拣到黄色区域的完整流程"""
+        print("执行黄色分拣流程")
+        self.action_full_grab_sequence()
+        self.action_place_yellow()
+        self.action_release()
+        self.action_move_up()
+
+    def action_sort_red(self):
+        """分拣到红色区域的完整流程"""
+        print("执行红色分拣流程")
+        self.action_full_grab_sequence()
+        self.action_place_red()
+        self.action_release()
+        self.action_move_up()
+
+    def action_sort_green(self):
+        """分拣到绿色区域的完整流程"""
+        print("执行绿色分拣流程")
+        self.action_full_grab_sequence()
+        self.action_place_green()
+        self.action_release()
+        self.action_move_up()
+
+    def action_sort_blue(self):
+        """分拣到蓝色区域的完整流程"""
+        print("执行蓝色分拣流程")
+        self.action_full_grab_sequence()
+        self.action_place_blue()
+        self.action_release()
+        self.action_move_up()
 
 class Ws_Param:
     def __init__(self, APPID, APIKey, APISecret):
@@ -143,26 +283,28 @@ class Ws_Param:
 voice_arm = None
 
 def understand_command(text):
-    """使用大模型理解语音指令"""
+    """使用大模型理解语音指令，返回动作关键词"""
     global voice_arm
     
-    system_prompt = """你是一个机械臂控制助手。用户会给你语音指令，你需要将其转换为机械臂控制命令。
+    # 获取所有可用的动作命令
+    available_actions = list(voice_arm.action_commands.keys())
+    actions_str = "、".join(available_actions)
+    
+    system_prompt = f"""你是一个机械臂控制助手。用户会给你语音指令，你需要从以下预定义的动作命令中选择最合适的一个：
 
-可用的控制命令：
-1. move_to_position: 移动到预定义位置
-   - 初始位置, 准备位置, 抓取位置, 放置黄色, 放置红色, 放置绿色, 放置蓝色
-2. clamp_open: 松开夹爪
-3. clamp_close: 夹紧夹爪
-4. move_up: 向上移动
-5. move_servo: 单独控制舵机 (需要指定舵机ID和角度)
+可用动作命令：
+{actions_str}
 
-请根据用户指令返回JSON格式的命令，例如：
-{"action": "move_to_position", "position": "准备位置"}
-{"action": "clamp_close"}
-{"action": "move_servo", "servo_id": 1, "angle": 90, "time": 500}
+请根据用户指令，只返回一个最匹配的动作关键词。如果无法匹配，返回"未知"。
 
-如果指令不清楚，返回：{"action": "unknown", "message": "指令不清楚，请重新说明"}
-"""
+示例：
+- 用户说"向上移动" -> 返回：向上
+- 用户说"夹住物体" -> 返回：夹取  
+- 用户说"放到红色区域" -> 返回：红色
+- 用户说"开始抓取流程" -> 返回：完整抓取
+- 用户说"分拣蓝色物品" -> 返回：分拣蓝色
+
+只返回动作关键词，不要返回其他内容。"""
 
     try:
         response = voice_arm.client.chat.completions.create(
@@ -175,62 +317,85 @@ def understand_command(text):
         )
         
         result = response.choices[0].message.content.strip()
-        print(f"大模型理解结果: {result}")
         
-        # 解析JSON命令
-        try:
-            command = json.loads(result)
-            return command
-        except json.JSONDecodeError:
-            # 如果不是标准JSON，尝试简单解析
-            return {"action": "unknown", "message": "无法解析指令"}
+        # 清理可能的markdown格式
+        result = re.sub(r'```.*?```', '', result, flags=re.DOTALL)
+        result = re.sub(r'`([^`]+)`', r'\1', result)
+        result = result.strip()
+        
+        print(f"大模型理解结果: {result}")
+        return result
             
     except Exception as e:
         print(f"大模型调用错误: {e}")
-        return {"action": "error", "message": str(e)}
+        return "未知"
 
-def execute_command(command):
-    """执行机械臂控制命令"""
+def execute_command(action_keyword):
+    """根据动作关键词执行对应的机械臂动作"""
     global voice_arm
     
     try:
-        action = command.get("action")
-        
-        if action == "move_to_position":
-            position_name = command.get("position")
-            if position_name in voice_arm.positions:
-                print(f"移动到: {position_name}")
-                voice_arm.arm_move(voice_arm.positions[position_name], 1000)
-            else:
-                print(f"未知位置: {position_name}")
-                
-        elif action == "clamp_open":
-            voice_arm.arm_clamp_block(0)
-            
-        elif action == "clamp_close":
-            voice_arm.arm_clamp_block(1)
-            
-        elif action == "move_up":
-            voice_arm.arm_move_up()
-            
-        elif action == "move_servo":
-            servo_id = command.get("servo_id", 1)
-            angle = command.get("angle", 90)
-            move_time = command.get("time", 500)
-            print(f"控制舵机 {servo_id} 到角度 {angle}")
-            voice_arm.arm.Arm_serial_servo_write(servo_id, angle, move_time)
-            
-        elif action == "unknown":
-            print(f"指令不清楚: {command.get('message', '请重新说明')}")
-            
-        elif action == "error":
-            print(f"执行错误: {command.get('message', '未知错误')}")
-            
+        if action_keyword in voice_arm.action_commands:
+            print(f"执行动作: {action_keyword}")
+            voice_arm.action_commands[action_keyword]()
         else:
-            print(f"未知动作: {action}")
+            print(f"未知动作: {action_keyword}")
+            print(f"可用动作: {', '.join(voice_arm.action_commands.keys())}")
             
     except Exception as e:
-        print(f"执行命令时出错: {e}")
+        print(f"执行动作时出错: {e}")
+
+def get_audio_devices():
+    """获取可用的音频设备"""
+    p = pyaudio.PyAudio()
+    devices = []
+    for i in range(p.get_device_count()):
+        device_info = p.get_device_info_by_index(i)
+        if device_info['maxInputChannels'] > 0:  # 只显示输入设备
+            devices.append({
+                'index': i,
+                'name': device_info['name'],
+                'channels': device_info['maxInputChannels'],
+                'rate': device_info['defaultSampleRate']
+            })
+    p.terminate()
+    return devices
+
+def test_audio_device(device_index=None):
+    """测试音频设备是否可用"""
+    try:
+        p = pyaudio.PyAudio()
+        
+        # 如果没有指定设备，使用默认设备
+        if device_index is None:
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=16000,
+                input=True,
+                frames_per_buffer=1024
+            )
+        else:
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=16000,
+                input=True,
+                input_device_index=device_index,
+                frames_per_buffer=1024
+            )
+        
+        # 测试录音
+        data = stream.read(1024)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        return True, "音频设备测试成功"
+        
+    except Exception as e:
+        if p:
+            p.terminate()
+        return False, f"音频设备测试失败: {e}"
 
 def on_open(ws):
     """WebSocket连接建立时的处理"""
@@ -243,68 +408,128 @@ def on_open(ws):
         CHANNELS = 1
         RATE = 16000
         
-        p = pyaudio.PyAudio()
-        stream = p.open(
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            frames_per_buffer=CHUNK
-        )
+        try:
+            # 获取可用音频设备
+            devices = get_audio_devices()
+            print(f"找到 {len(devices)} 个音频输入设备:")
+            for device in devices:
+                print(f"  设备 {device['index']}: {device['name']}")
+            
+            # 尝试使用音频设备
+            p = pyaudio.PyAudio()
+            stream = None
+            
+            # 首先尝试默认设备
+            try:
+                stream = p.open(
+                    format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK
+                )
+                print("使用默认音频设备")
+            except Exception as e:
+                print(f"默认音频设备失败: {e}")
+                
+                # 尝试其他可用设备
+                for device in devices:
+                    try:
+                        stream = p.open(
+                            format=FORMAT,
+                            channels=CHANNELS,
+                            rate=RATE,
+                            input=True,
+                            input_device_index=device['index'],
+                            frames_per_buffer=CHUNK
+                        )
+                        print(f"使用音频设备: {device['name']}")
+                        break
+                    except Exception as device_error:
+                        print(f"设备 {device['index']} 失败: {device_error}")
+                        continue
+            
+            if stream is None:
+                print("错误: 无法找到可用的音频设备")
+                print("请检查麦克风连接或尝试文本模式")
+                voice_arm.is_listening = False
+                p.terminate()
+                return
+                
+        except Exception as init_error:
+            print(f"音频初始化失败: {init_error}")
+            print("切换到文本输入模式")
+            voice_arm.is_listening = False
+            return
         
         print("开始语音识别...")
         voice_arm.is_listening = True
         
-        for i in range(0, int(RATE/CHUNK*10)):  # 10秒录音
-            if not voice_arm.is_running:
-                break
-                
-            buf = stream.read(CHUNK)
-            if not buf:
-                status = voice_arm.STATUS_LAST_FRAME
-                
-            if status == voice_arm.STATUS_FIRST_FRAME:
-                d = {
-                    "common": wsParam.CommonArgs,
-                    "business": wsParam.BusinessArgs,
-                    "data": {
-                        "status": 0,
-                        "format": "audio/L16;rate=16000",
-                        "audio": str(base64.b64encode(buf), 'utf-8'),
-                        "encoding": "raw"
-                    }
-                }
-                ws.send(json.dumps(d))
-                status = voice_arm.STATUS_CONTINUE_FRAME
-                
-            elif status == voice_arm.STATUS_CONTINUE_FRAME:
-                d = {
-                    "data": {
-                        "status": 1,
-                        "format": "audio/L16;rate=16000",
-                        "audio": str(base64.b64encode(buf), 'utf-8'),
-                        "encoding": "raw"
-                    }
-                }
-                ws.send(json.dumps(d))
-                
-            elif status == voice_arm.STATUS_LAST_FRAME:
-                d = {
-                    "data": {
-                        "status": 2,
-                        "format": "audio/L16;rate=16000",
-                        "audio": str(base64.b64encode(buf), 'utf-8'),
-                        "encoding": "raw"
-                    }
-                }
-                ws.send(json.dumps(d))
-                time.sleep(1)
-                break
-                
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-        voice_arm.is_listening = False
+        try:
+            for i in range(0, int(RATE/CHUNK*10)):  # 10秒录音
+                if not voice_arm.is_running:
+                    break
+                    
+                try:
+                    buf = stream.read(CHUNK, exception_on_overflow=False)
+                    if not buf:
+                        status = voice_arm.STATUS_LAST_FRAME
+                        
+                    if status == voice_arm.STATUS_FIRST_FRAME:
+                        d = {
+                            "common": wsParam.CommonArgs,
+                            "business": wsParam.BusinessArgs,
+                            "data": {
+                                "status": 0,
+                                "format": "audio/L16;rate=16000",
+                                "audio": str(base64.b64encode(buf), 'utf-8'),
+                                "encoding": "raw"
+                            }
+                        }
+                        ws.send(json.dumps(d))
+                        status = voice_arm.STATUS_CONTINUE_FRAME
+                        
+                    elif status == voice_arm.STATUS_CONTINUE_FRAME:
+                        d = {
+                            "data": {
+                                "status": 1,
+                                "format": "audio/L16;rate=16000",
+                                "audio": str(base64.b64encode(buf), 'utf-8'),
+                                "encoding": "raw"
+                            }
+                        }
+                        ws.send(json.dumps(d))
+                        
+                    elif status == voice_arm.STATUS_LAST_FRAME:
+                        d = {
+                            "data": {
+                                "status": 2,
+                                "format": "audio/L16;rate=16000",
+                                "audio": str(base64.b64encode(buf), 'utf-8'),
+                                "encoding": "raw"
+                            }
+                        }
+                        ws.send(json.dumps(d))
+                        time.sleep(1)
+                        break
+                        
+                except Exception as read_error:
+                    print(f"读取音频数据出错: {read_error}")
+                    break
+                    
+        except Exception as record_error:
+            print(f"录音过程出错: {record_error}")
+        finally:
+            try:
+                if stream:
+                    stream.stop_stream()
+                    stream.close()
+                if p:
+                    p.terminate()
+            except:
+                pass
+            voice_arm.is_listening = False
+            print("录音结束")
         
     thread.start_new_thread(run, ())
 
@@ -331,8 +556,8 @@ def on_message(ws, message):
                 voice_arm.recording_results = result
                 
                 # 理解并执行命令
-                command = understand_command(result)
-                execute_command(command)
+                action_keyword = understand_command(result)
+                execute_command(action_keyword)
                 
     except Exception as e:
         print(f"解析语音识别结果时出错: {e}")
@@ -341,7 +566,7 @@ def on_error(ws, error):
     """WebSocket错误处理"""
     print(f"WebSocket错误: {error}")
 
-def on_close(ws):
+def on_close(ws, close_status_code=None, close_msg=None):
     """WebSocket关闭处理"""
     print("语音识别连接已关闭")
 
@@ -375,8 +600,33 @@ def command_interface():
     print("1. 'start' - 开始语音识别")
     print("2. 'test' - 测试机械臂动作")
     print("3. 'reset' - 重置机械臂位置") 
-    print("4. 'quit' - 退出系统")
-    print("5. 或直接说出控制指令，如：'移动到准备位置'、'夹紧夹爪'等")
+    print("4. 'audio' - 检测音频设备")
+    print("5. 'actions' - 显示所有可用动作")
+    print("6. 'quit' - 退出系统")
+    print("7. 或直接说出控制指令，如：'准备'、'抓取'、'分拣红色'等")
+    
+    # 首先检测音频设备
+    print("\n正在检测音频设备...")
+    try:
+        devices = get_audio_devices()
+        if devices:
+            print(f"找到 {len(devices)} 个可用音频设备:")
+            for device in devices:
+                print(f"  设备 {device['index']}: {device['name']}")
+            
+            # 测试默认音频设备
+            success, message = test_audio_device()
+            if success:
+                print("✓ 音频设备正常，可以使用语音控制")
+            else:
+                print(f"✗ 音频设备测试失败: {message}")
+                print("建议使用文本输入模式进行测试")
+        else:
+            print("✗ 未找到可用的音频输入设备")
+            print("系统将只支持文本输入模式")
+    except Exception as e:
+        print(f"✗ 音频设备检测失败: {e}")
+        print("系统将只支持文本输入模式")
     
     while voice_arm.is_running:
         try:
@@ -396,23 +646,43 @@ def command_interface():
                     
             elif cmd == 'test':
                 print("执行测试动作...")
-                voice_arm.arm_move(voice_arm.positions["准备位置"], 1000)
+                voice_arm.action_ready()
                 time.sleep(1)
-                voice_arm.arm_clamp_block(1)
+                voice_arm.action_grab()
                 time.sleep(1)
-                voice_arm.arm_clamp_block(0)
-                voice_arm.arm_move(voice_arm.positions["初始位置"], 1000)
+                voice_arm.action_release()
+                voice_arm.action_init()
                 print("测试完成")
                 
             elif cmd == 'reset':
                 print("重置机械臂位置...")
                 voice_arm.init_arm()
                 
+            elif cmd == 'actions':
+                print("可用动作命令:")
+                for i, action in enumerate(voice_arm.action_commands.keys(), 1):
+                    print(f"  {i:2d}. {action}")
+                
+            elif cmd == 'audio':
+                print("检测音频设备...")
+                try:
+                    devices = get_audio_devices()
+                    if devices:
+                        print(f"找到 {len(devices)} 个音频设备:")
+                        for device in devices:
+                            success, message = test_audio_device(device['index'])
+                            status = "✓" if success else "✗"
+                            print(f"  {status} 设备 {device['index']}: {device['name']} - {message}")
+                    else:
+                        print("未找到音频输入设备")
+                except Exception as e:
+                    print(f"音频设备检测失败: {e}")
+                
             elif cmd:
                 # 直接处理文本指令
                 print(f"处理指令: {cmd}")
-                command = understand_command(cmd)
-                execute_command(command)
+                action_keyword = understand_command(cmd)
+                execute_command(action_keyword)
                 
         except KeyboardInterrupt:
             print("\n检测到中断信号，正在退出...")

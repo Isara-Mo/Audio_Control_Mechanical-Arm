@@ -37,7 +37,7 @@ class VoiceControlledArm:
         
         # 初始化OpenAI客户端
         self.client = OpenAI(
-            api_key="sk-029607f5bc9a4e15864e1e1a302d152b", 
+            api_key="", 
             base_url="https://api.deepseek.com"
         )
         
