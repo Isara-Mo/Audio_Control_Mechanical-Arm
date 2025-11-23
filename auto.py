@@ -1,55 +1,38 @@
-#!/usr/bin/env python3
-# coding=utf-8
-"""
-语音控制机械臂系统 - 改进版
-使用预定义动作命令，简化模型理解过程
-"""
-
-import websocket
+import time
+import json
+import re
+import threading
+import queue
+import ssl
 import hashlib
 import base64
 import hmac
-import json
 from urllib.parse import urlencode
-import time
-import ssl
-from wsgiref.handlers import format_date_time
 from datetime import datetime
 from time import mktime
 import _thread as thread
 import pyaudio
-from openai import OpenAI
-from Arm_Lib import Arm_Device
-import threading
-import queue
-import re
+import websocket
+from typing import List, Dict, Any
 
-class VoiceControlledArm:
+# --- 1. 导入 LangChain 核心组件 ---
+from langchain_community.chat_models import ChatOpenAI
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.tools import tool
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.documents import Document
+from langchain_community.vectorstores import InMemoryVectorStore
+from langchain_community.embeddings import FakeEmbeddings # 使用假嵌入进行演示
+from langchain_core.retrievers import BaseRetriever
+
+# =======================================================
+# ========== 硬件模拟与 LangChain Tools (与上一版本相同) ==========
+# =======================================================
+
+class ArmDeviceSimulator:
+    """模拟 Arm_Lib 机械臂设备"""
     def __init__(self):
-        # 语音识别参数
-        self.recording_results = ""
-        self.STATUS_FIRST_FRAME = 0
-        self.STATUS_CONTINUE_FRAME = 1
-        self.STATUS_LAST_FRAME = 2
-        
-        # 初始化机械臂
-        self.arm = Arm_Device()
-        time.sleep(0.1)
-        
-        # 初始化OpenAI客户端
-        self.client = OpenAI(
-            api_key="", 
-            base_url="https://api.deepseek.com"
-        )
-        
-        # 指令队列
-        self.command_queue = queue.Queue()
-        
-        # 系统状态
-        self.is_running = True
-        self.is_listening = False
-        
-        # 预定义位置
+        print("🛠️ ArmDeviceSimulator: 机械臂硬件模拟初始化。")
         self.positions = {
             "初始位置": [90, 130, 0, 0, 90],
             "准备位置": [90, 80, 50, 50, 270],
@@ -59,426 +42,261 @@ class VoiceControlledArm:
             "放置绿色": [136, 66, 20, 29, 270],
             "放置蓝色": [44, 66, 20, 28, 270],
         }
-        
-        # 预定义动作命令集
-        self.action_commands = {
-            # 基础动作
-            "初始化": self.action_init,
-            "复位": self.action_init,
-            "重置": self.action_init,
-            
-            "准备": self.action_ready,
-            "待机": self.action_ready,
-            
-            "抓取": self.action_grab,
-            "夹取": self.action_grab,
-            "夹住": self.action_grab,
-            
-            "松开": self.action_release,
-            "放开": self.action_release,
-            "释放": self.action_release,
-            
-            "向上": self.action_move_up,
-            "上升": self.action_move_up,
-            "升高": self.action_move_up,
-            
-            # 颜色分类动作
-            "黄色": self.action_place_yellow,
-            "放黄色": self.action_place_yellow,
-            "黄色区域": self.action_place_yellow,
-            
-            "红色": self.action_place_red,
-            "放红色": self.action_place_red,
-            "红色区域": self.action_place_red,
-            
-            "绿色": self.action_place_green,
-            "放绿色": self.action_place_green,
-            "绿色区域": self.action_place_green,
-            
-            "蓝色": self.action_place_blue,
-            "放蓝色": self.action_place_blue,
-            "蓝色区域": self.action_place_blue,
-            
-            # 组合动作
-            "完整抓取": self.action_full_grab_sequence,
-            "抓取流程": self.action_full_grab_sequence,
-            "执行抓取": self.action_full_grab_sequence,
-            
-            "分拣黄色": self.action_sort_yellow,
-            "分拣红色": self.action_sort_red,
-            "分拣绿色": self.action_sort_green,
-            "分拣蓝色": self.action_sort_blue,
-        }
-        
-        # 初始化机械臂位置
+        self.current_action = "init"
         self.init_arm()
 
-    def init_arm(self):
-        """初始化机械臂到准备位置"""
-        print("正在初始化机械臂...")
-        self.arm_clamp_block(0)  # 松开夹爪
-        self.arm_move(self.positions["初始位置"], 1000)
-        print("机械臂初始化完成")
+    def Arm_serial_servo_write(self, servo_id, angle, s_time):
+        print(f"  [ARM_MOVE_SIM] 舵机 {servo_id} 移动到 {angle} (耗时: {s_time/1000}s)")
 
-    def arm_clamp_block(self, enable):
-        """控制夹爪，enable=1：夹住，=0：松开"""
-        if enable == 0:
-            self.arm.Arm_serial_servo_write(6, 60, 400)
-            print("松开夹爪")
-        else:
-            self.arm.Arm_serial_servo_write(6, 130, 400)
-            print("夹紧夹爪")
-        time.sleep(0.5)
+    def arm_clamp_block(self, enable: int):
+        action = "夹紧夹爪" if enable == 1 else "松开夹爪"
+        print(f"  [ARM_CLAMP_SIM] {action}")
+        self.Arm_serial_servo_write(6, 130 if enable == 1 else 60, 400)
 
-    def arm_move(self, position, s_time=500):
-        """移动机械臂到指定位置"""
-        for i in range(5):
+    def arm_move(self, position: List[int], s_time: int = 500):
+        print(f"  [ARM_MOVE_SIM] 移动到位置: {position} (耗时: {s_time/1000}s)")
+        for i, angle in enumerate(position):
             servo_id = i + 1
-            if servo_id == 5:
-                time.sleep(0.1)
-                self.arm.Arm_serial_servo_write(servo_id, position[i], int(s_time * 1.2))
-            else:
-                self.arm.Arm_serial_servo_write(servo_id, position[i], s_time)
-            time.sleep(0.01)
-        time.sleep(s_time / 1000)
+            self.Arm_serial_servo_write(servo_id, angle, s_time)
 
     def arm_move_up(self):
-        """机械臂向上移动"""
-        self.arm.Arm_serial_servo_write(2, 90, 1500)
-        self.arm.Arm_serial_servo_write(3, 90, 1500)
-        self.arm.Arm_serial_servo_write(4, 90, 1500)
-        time.sleep(1.5)
+        print("  [ARM_MOVE_SIM] 机械臂向上抬升...")
+        self.Arm_serial_servo_write(2, 90, 1500)
+        self.Arm_serial_servo_write(3, 90, 1500)
+        self.Arm_serial_servo_write(4, 90, 1500)
 
-    # 预定义动作命令
-    def action_init(self):
-        """初始化动作"""
-        print("执行初始化动作")
+    def init_arm(self):
+        print("  [SYSTEM] 正在初始化机械臂...")
         self.arm_clamp_block(0)
         self.arm_move(self.positions["初始位置"], 1000)
+        self.current_action = "init"
+        print("  [SYSTEM] 机械臂初始化完成")
 
-    def action_ready(self):
-        """准备动作"""
-        print("执行准备动作")
-        self.arm_move(self.positions["准备位置"], 1000)
+ARM_DEVICE = ArmDeviceSimulator()
 
-    def action_grab(self):
-        """抓取动作"""
-        print("执行抓取动作")
-        self.arm_move(self.positions["抓取位置"], 1000)
-        self.arm_clamp_block(1)
+# 机械臂动作工具 (LangChain Tool) - 仅列举部分，其余类似
+@tool
+def action_init() -> str:
+    """初始化机械臂到初始位置，执行复位或重置操作。"""
+    print("✅ Tool Call: action_init")
+    ARM_DEVICE.arm_clamp_block(0)
+    ARM_DEVICE.arm_move(ARM_DEVICE.positions["初始位置"], 1000)
+    return "机械臂已初始化并复位到初始位置。"
 
-    def action_release(self):
-        """释放动作"""
-        print("执行释放动作")
-        self.arm_clamp_block(0)
+@tool
+def action_ready() -> str:
+    """移动机械臂到准备/待机位置，准备接收抓取指令。"""
+    print("✅ Tool Call: action_ready")
+    ARM_DEVICE.arm_move(ARM_DEVICE.positions["准备位置"], 1000)
+    return "机械臂已移动到准备/待机位置。"
 
-    def action_move_up(self):
-        """向上移动动作"""
-        print("执行向上移动动作")
-        self.arm_move_up()
+@tool
+def action_grab() -> str:
+    """移动机械臂到抓取位置，并夹紧夹爪，执行夹取操作。"""
+    print("✅ Tool Call: action_grab")
+    ARM_DEVICE.arm_move(ARM_DEVICE.positions["抓取位置"], 1000)
+    ARM_DEVICE.arm_clamp_block(1)
+    return "机械臂已移动到抓取位置并夹紧夹爪。"
 
-    def action_place_yellow(self):
-        """放置到黄色区域"""
-        print("执行放置黄色动作")
-        self.arm_move(self.positions["放置黄色"], 1000)
+@tool
+def action_release() -> str:
+    """松开夹爪，释放夹取的物体。"""
+    print("✅ Tool Call: action_release")
+    ARM_DEVICE.arm_clamp_block(0)
+    return "机械臂已松开夹爪，释放物体。"
 
-    def action_place_red(self):
-        """放置到红色区域"""
-        print("执行放置红色动作")
-        self.arm_move(self.positions["放置红色"], 1000)
+@tool
+def action_sort_yellow() -> str:
+    """执行分拣黄色物品的完整流程：完整抓取序列 -> 放置黄色 -> 释放 -> 向上抬升。"""
+    print("✅ Tool Call: action_sort_yellow")
+    # 模拟组合动作的调用
+    action_ready()
+    action_grab()
+    ARM_DEVICE.arm_move_up() 
+    ARM_DEVICE.arm_move(ARM_DEVICE.positions["放置黄色"], 1000)
+    action_release()
+    ARM_DEVICE.arm_move_up() 
+    return "黄色分拣流程已执行。"
 
-    def action_place_green(self):
-        """放置到绿色区域"""
-        print("执行放置绿色动作")
-        self.arm_move(self.positions["放置绿色"], 1000)
+# 完整的工具列表
+ALL_ARM_TOOLS = [
+    action_init, action_ready, action_grab, action_release, 
+    action_sort_yellow, # ... 其他所有动作都应该在此处列出
+]
 
-    def action_place_blue(self):
-        """放置到蓝色区域"""
-        print("执行放置蓝色动作")
-        self.arm_move(self.positions["放置蓝色"], 1000)
+# RAG 数据源创建 (用于增强 Agent 的意图识别)
+action_data = [
+    ("初始化", "action_init", "执行初始化动作，复位，重置，回到初始位置"),
+    ("准备", "action_ready", "执行准备动作，待机，准备接收指令"),
+    ("抓取", "action_grab", "移动到抓取位置并夹紧，夹取，夹住"),
+    ("释放", "action_release", "松开夹爪，放开，释放物体"),
+    ("向上移动", "action_move_up", "向上抬升，上升，升高，抬高机械臂"),
+    ("分拣黄色", "action_sort_yellow", "分拣到黄色区域的完整流程，黄色分拣，将物体放到黄色的地方"),
+    # ... 其他动作
+]
 
-    def action_full_grab_sequence(self):
-        """完整的抓取序列"""
-        print("执行完整抓取序列")
-        self.action_ready()
-        time.sleep(0.5)
-        self.action_grab()
-        time.sleep(0.5)
-        self.action_move_up()
-
-    def action_sort_yellow(self):
-        """分拣到黄色区域的完整流程"""
-        print("执行黄色分拣流程")
-        self.action_full_grab_sequence()
-        self.action_place_yellow()
-        self.action_release()
-        self.action_move_up()
-
-    def action_sort_red(self):
-        """分拣到红色区域的完整流程"""
-        print("执行红色分拣流程")
-        self.action_full_grab_sequence()
-        self.action_place_red()
-        self.action_release()
-        self.action_move_up()
-
-    def action_sort_green(self):
-        """分拣到绿色区域的完整流程"""
-        print("执行绿色分拣流程")
-        self.action_full_grab_sequence()
-        self.action_place_green()
-        self.action_release()
-        self.action_move_up()
-
-    def action_sort_blue(self):
-        """分拣到蓝色区域的完整流程"""
-        print("执行蓝色分拣流程")
-        self.action_full_grab_sequence()
-        self.action_place_blue()
-        self.action_release()
-        self.action_move_up()
-
-class Ws_Param:
-    def __init__(self, APPID, APIKey, APISecret):
-        self.APPID = APPID
-        self.APIKey = APIKey
-        self.APISecret = APISecret
-        self.CommonArgs = {"app_id": self.APPID}
-        self.BusinessArgs = {
-            "domain": "iat",
-            "language": "zh_cn",
-            "accent": "mandarin",
-            "vinfo": 1,
-            "vad_eos": 1000
-        }
-
-    def create_url(self):
-        url = 'wss://ws-api.xfyun.cn/v2/iat'
-        now = datetime.now()
-        date = format_date_time(mktime(now.timetuple()))
-        
-        signature_origin = "host: ws-api.xfyun.cn\n"
-        signature_origin += "date: " + date + "\n"
-        signature_origin += "GET /v2/iat HTTP/1.1"
-        
-        signature_sha = hmac.new(
-            self.APISecret.encode('utf-8'),
-            signature_origin.encode('utf-8'),
-            digestmod=hashlib.sha256
-        ).digest()
-        signature_sha = base64.b64encode(signature_sha).decode(encoding='utf-8')
-        
-        authorization_origin = f'api_key="{self.APIKey}", algorithm="hmac-sha256", headers="host date request-line", signature="{signature_sha}"'
-        authorization = base64.b64encode(authorization_origin.encode('utf-8')).decode(encoding='utf-8')
-        
-        v = {
-            "authorization": authorization,
-            "date": date,
-            "host": "ws-api.xfyun.cn"
-        }
-        url = url + '?' + urlencode(v)
-        return url
-
-# 全局变量
-voice_arm = None
-
-def understand_command(text):
-    """使用大模型理解语音指令，返回动作关键词"""
-    global voice_arm
-    
-    # 获取所有可用的动作命令
-    available_actions = list(voice_arm.action_commands.keys())
-    actions_str = "、".join(available_actions)
-    
-    system_prompt = f"""你是一个机械臂控制助手。用户会给你语音指令，你需要从以下预定义的动作命令中选择最合适的一个：
-
-可用动作命令：
-{actions_str}
-
-请根据用户指令，只返回一个最匹配的动作关键词。如果无法匹配，返回"未知"。
-
-示例：
-- 用户说"向上移动" -> 返回：向上
-- 用户说"夹住物体" -> 返回：夹取  
-- 用户说"放到红色区域" -> 返回：红色
-- 用户说"开始抓取流程" -> 返回：完整抓取
-- 用户说"分拣蓝色物品" -> 返回：分拣蓝色
-
-只返回动作关键词，不要返回其他内容。"""
-
-    try:
-        response = voice_arm.client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"用户说：{text}"}
-            ],
-            stream=False
+rag_documents = []
+for name, id_func, description in action_data:
+    content = f"动作名: {name}. 功能描述/别名: {description}"
+    rag_documents.append(
+        Document(
+            page_content=content,
+            metadata={"action_name": name, "tool_name": id_func}
         )
-        
-        result = response.choices[0].message.content.strip()
-        
-        # 清理可能的markdown格式
-        result = re.sub(r'```.*?```', '', result, flags=re.DOTALL)
-        result = re.sub(r'`([^`]+)`', r'\1', result)
-        result = result.strip()
-        
-        print(f"大模型理解结果: {result}")
-        return result
-            
-    except Exception as e:
-        print(f"大模型调用错误: {e}")
-        return "未知"
+    )
 
-def execute_command(action_keyword):
-    """根据动作关键词执行对应的机械臂动作"""
-    global voice_arm
+vector_store = InMemoryVectorStore.from_documents(
+    rag_documents,
+    embedding=FakeEmbeddings(size=128)
+)
+RAG_RETRIEVER = vector_store.as_retriever(k=3)
+
+# Agent 执行函数
+def setup_langchain_agent(llm, tools: List, retriever: BaseRetriever):
+    """设置 LangChain Agent"""
+    RAG_CONTEXT_PROMPT = """
+    你是一个机械臂控制助手。你的任务是根据用户的指令（来自语音或文本），选择合适的工具（机械臂动作）来执行。
     
-    try:
-        if action_keyword in voice_arm.action_commands:
-            print(f"执行动作: {action_keyword}")
-            voice_arm.action_commands[action_keyword]()
-        else:
-            print(f"未知动作: {action_keyword}")
-            print(f"可用动作: {', '.join(voice_arm.action_commands.keys())}")
-            
-    except Exception as e:
-        print(f"执行动作时出错: {e}")
+    请参考以下从RAG数据库中检索到的相关机械臂动作描述，它们包含动作名称、对应的工具ID和别名描述：
+    
+    --- RAG 上下文 (动作描述和ID) ---
+    {context}
+    ---
+    
+    请根据用户的最终指令，选择最合适的工具进行调用。如果指令与机械臂动作无关，请礼貌地回复。
+    
+    用户指令:
+    """
 
-def get_audio_devices():
-    """获取可用的音频设备"""
-    p = pyaudio.PyAudio()
-    devices = []
-    for i in range(p.get_device_count()):
-        device_info = p.get_device_info_by_index(i)
-        if device_info['maxInputChannels'] > 0:  # 只显示输入设备
-            devices.append({
-                'index': i,
-                'name': device_info['name'],
-                'channels': device_info['maxInputChannels'],
-                'rate': device_info['defaultSampleRate']
-            })
-    p.terminate()
-    return devices
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", RAG_CONTEXT_PROMPT),
+        MessagesPlaceholder("chat_history", optional=True),
+        ("human", "{input}"),
+        MessagesPlaceholder("agent_scratchpad"),
+    ])
 
-def test_audio_device(device_index=None):
-    """测试音频设备是否可用"""
-    try:
-        p = pyaudio.PyAudio()
-        
-        # 如果没有指定设备，使用默认设备
-        if device_index is None:
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=16000,
-                input=True,
-                frames_per_buffer=1024
-            )
-        else:
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=16000,
-                input=True,
-                input_device_index=device_index,
-                frames_per_buffer=1024
-            )
-        
-        # 测试录音
-        data = stream.read(1024)
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-        return True, "音频设备测试成功"
-        
-    except Exception as e:
-        if p:
-            p.terminate()
-        return False, f"音频设备测试失败: {e}"
+    agent = create_openai_tools_agent(llm=llm, tools=tools, prompt=prompt)
 
-def on_open(ws):
-    """WebSocket连接建立时的处理"""
-    def run(*args):
-        global voice_arm
-        status = voice_arm.STATUS_FIRST_FRAME
+    # 返回一个可调用的函数，用于执行 Agent
+    def run_agent(input_text: str):
+        print(f"\n🧠 Agent 正在处理指令: '{input_text}'...")
+        # 1. 执行 RAG 检索
+        retrieved_docs = retriever.invoke(input_text)
+        context = "\n".join([f"- 动作名: {doc.metadata['action_name']}, 对应ID: {doc.metadata['tool_name']}, 描述: {doc.page_content}" for doc in retrieved_docs])
         
-        CHUNK = 520
-        FORMAT = pyaudio.paInt16
-        CHANNELS = 1
-        RATE = 16000
-        
+        # 2. 调用 Agent Executor
+        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
         try:
-            # 获取可用音频设备
-            devices = get_audio_devices()
-            print(f"找到 {len(devices)} 个音频输入设备:")
-            for device in devices:
-                print(f"  设备 {device['index']}: {device['name']}")
+            result = agent_executor.invoke({"input": input_text, "context": context})
+            print(f"🤖 Agent 最终响应: {result['output']}")
+            return result
+        except Exception as e:
+            print(f"🚨 Agent 执行失败: {e}")
+            return {"output": "抱歉，执行机械臂动作时发生错误。"}
+
+    return run_agent
+
+# =======================================================
+# ========== 讯飞语音识别模块 (集成) ==========
+# =======================================================
+
+class ASRClient:
+    """集成语音识别和 Agent 逻辑的客户端"""
+    
+    def __init__(self, run_agent_func):
+        self.run_agent_func = run_agent_func
+        
+        # 语音识别参数
+        self.STATUS_FIRST_FRAME = 0
+        self.STATUS_CONTINUE_FRAME = 1
+        self.STATUS_LAST_FRAME = 2
+        self.is_running = True
+        self.is_listening = False
+        
+        # 讯飞 API 参数 (请替换为您的真实密钥)
+        self.APPID = '45099785'
+        self.APIKey = ''
+        self.APISecret = ''
+        self.ws_param = self._get_ws_param()
+
+    def _get_ws_param(self):
+        """生成讯飞 WebSocket 连接参数"""
+        class Ws_Param_Internal:
+            def __init__(self, APPID, APIKey, APISecret):
+                self.APPID = APPID
+                self.APIKey = APIKey
+                self.APISecret = APISecret
+                self.CommonArgs = {"app_id": self.APPID}
+                self.BusinessArgs = {
+                    "domain": "iat",
+                    "language": "zh_cn",
+                    "accent": "mandarin",
+                    "vinfo": 1,
+                    "vad_eos": 1000
+                }
+
+            def create_url(self):
+                url = 'wss://ws-api.xfyun.cn/v2/iat'
+                now = datetime.now()
+                date = format_date_time(mktime(now.timetuple()))
+                
+                signature_origin = f"host: ws-api.xfyun.cn\ndate: {date}\nGET /v2/iat HTTP/1.1"
+                
+                signature_sha = hmac.new(
+                    self.APISecret.encode('utf-8'),
+                    signature_origin.encode('utf-8'),
+                    digestmod=hashlib.sha256
+                ).digest()
+                signature_sha = base64.b64encode(signature_sha).decode(encoding='utf-8')
+                
+                authorization_origin = f'api_key="{self.APIKey}", algorithm="hmac-sha256", headers="host date request-line", signature="{signature_sha}"'
+                authorization = base64.b64encode(authorization_origin.encode('utf-8')).decode(encoding='utf-8')
+                
+                v = {
+                    "authorization": authorization,
+                    "date": date,
+                    "host": "ws-api.xfyun.cn"
+                }
+                return url + '?' + urlencode(v)
+        return Ws_Param_Internal(self.APPID, self.APIKey, self.APISecret)
+
+    def on_open(self, ws):
+        """WebSocket连接建立时的处理"""
+        def run(*args):
+            status = self.STATUS_FIRST_FRAME
             
-            # 尝试使用音频设备
-            p = pyaudio.PyAudio()
+            CHUNK = 520
+            FORMAT = pyaudio.paInt16
+            CHANNELS = 1
+            RATE = 16000
+            
+            p = None
             stream = None
-            
-            # 首先尝试默认设备
             try:
+                p = pyaudio.PyAudio()
+                # 尝试使用默认设备
                 stream = p.open(
                     format=FORMAT,
                     channels=CHANNELS,
                     rate=RATE,
                     input=True,
-                    frames_per_buffer=CHUNK
+                    frames_per_buffer=CHUNK,
+                    exception_on_overflow=False # 容忍缓冲区溢出
                 )
-                print("使用默认音频设备")
-            except Exception as e:
-                print(f"默认音频设备失败: {e}")
+                print("🔊 麦克风已打开，开始录音...")
+                self.is_listening = True
                 
-                # 尝试其他可用设备
-                for device in devices:
-                    try:
-                        stream = p.open(
-                            format=FORMAT,
-                            channels=CHANNELS,
-                            rate=RATE,
-                            input=True,
-                            input_device_index=device['index'],
-                            frames_per_buffer=CHUNK
-                        )
-                        print(f"使用音频设备: {device['name']}")
+                # 10秒录音循环
+                for i in range(0, int(RATE/CHUNK*10)):
+                    if not self.is_running:
                         break
-                    except Exception as device_error:
-                        print(f"设备 {device['index']} 失败: {device_error}")
-                        continue
-            
-            if stream is None:
-                print("错误: 无法找到可用的音频设备")
-                print("请检查麦克风连接或尝试文本模式")
-                voice_arm.is_listening = False
-                p.terminate()
-                return
-                
-        except Exception as init_error:
-            print(f"音频初始化失败: {init_error}")
-            print("切换到文本输入模式")
-            voice_arm.is_listening = False
-            return
-        
-        print("开始语音识别...")
-        voice_arm.is_listening = True
-        
-        try:
-            for i in range(0, int(RATE/CHUNK*10)):  # 10秒录音
-                if not voice_arm.is_running:
-                    break
-                    
-                try:
-                    buf = stream.read(CHUNK, exception_on_overflow=False)
-                    if not buf:
-                        status = voice_arm.STATUS_LAST_FRAME
                         
-                    if status == voice_arm.STATUS_FIRST_FRAME:
+                    buf = stream.read(CHUNK, exception_on_overflow=False)
+                    
+                    if status == self.STATUS_FIRST_FRAME:
                         d = {
-                            "common": wsParam.CommonArgs,
-                            "business": wsParam.BusinessArgs,
+                            "common": self.ws_param.CommonArgs,
+                            "business": self.ws_param.BusinessArgs,
                             "data": {
                                 "status": 0,
                                 "format": "audio/L16;rate=16000",
@@ -487,9 +305,9 @@ def on_open(ws):
                             }
                         }
                         ws.send(json.dumps(d))
-                        status = voice_arm.STATUS_CONTINUE_FRAME
+                        status = self.STATUS_CONTINUE_FRAME
                         
-                    elif status == voice_arm.STATUS_CONTINUE_FRAME:
+                    elif status == self.STATUS_CONTINUE_FRAME:
                         d = {
                             "data": {
                                 "status": 1,
@@ -500,218 +318,138 @@ def on_open(ws):
                         }
                         ws.send(json.dumps(d))
                         
-                    elif status == voice_arm.STATUS_LAST_FRAME:
-                        d = {
-                            "data": {
-                                "status": 2,
-                                "format": "audio/L16;rate=16000",
-                                "audio": str(base64.b64encode(buf), 'utf-8'),
-                                "encoding": "raw"
-                            }
+                # 最后一帧
+                if self.is_running:
+                    d = {
+                        "data": {
+                            "status": 2,
+                            "format": "audio/L16;rate=16000",
+                            "audio": str(base64.b64encode(buf), 'utf-8'),
+                            "encoding": "raw"
                         }
-                        ws.send(json.dumps(d))
-                        time.sleep(1)
-                        break
-                        
-                except Exception as read_error:
-                    print(f"读取音频数据出错: {read_error}")
-                    break
-                    
-        except Exception as record_error:
-            print(f"录音过程出错: {record_error}")
-        finally:
-            try:
+                    }
+                    ws.send(json.dumps(d))
+                    time.sleep(1) # 等待结果返回
+            
+            except Exception as e:
+                print(f"🚨 录音或WebSocket发送出错: {e}")
+            finally:
                 if stream:
                     stream.stop_stream()
                     stream.close()
                 if p:
                     p.terminate()
-            except:
-                pass
-            voice_arm.is_listening = False
-            print("录音结束")
-        
-    thread.start_new_thread(run, ())
-
-def on_message(ws, message):
-    """收到语音识别结果的处理"""
-    global voice_arm
-    
-    try:
-        code = json.loads(message)["code"]
-        sid = json.loads(message)["sid"]
-        
-        if code != 0:
-            errMsg = json.loads(message)["message"]
-            print(f"sid:{sid} call error:{errMsg} code is:{code}")
-        else:
-            data = json.loads(message)["data"]["result"]["ws"]
-            result = ""
-            for i in data:
-                for w in i["cw"]:
-                    result += w["w"]
-                    
-            if result and result not in ['。', '.。', ' .。', ' 。']:
-                print(f"识别结果: {result}")
-                voice_arm.recording_results = result
+                self.is_listening = False
+                print("🎙️ 录音结束，等待识别结果...")
                 
-                # 理解并执行命令
-                action_keyword = understand_command(result)
-                execute_command(action_keyword)
-                
-    except Exception as e:
-        print(f"解析语音识别结果时出错: {e}")
+        thread.start_new_thread(run, ())
 
-def on_error(ws, error):
-    """WebSocket错误处理"""
-    print(f"WebSocket错误: {error}")
-
-def on_close(ws, close_status_code=None, close_msg=None):
-    """WebSocket关闭处理"""
-    print("语音识别连接已关闭")
-
-def start_voice_recognition():
-    """启动语音识别"""
-    global wsParam, voice_arm
-    
-    wsParam = Ws_Param(
-        APPID='45099785',
-        APIKey='33a475906a78026f4e272057c31a1486',
-        APISecret='ZGYxYWM4ZThjZjE0ZjY1NTY2OGRlYTI1'
-    )
-    
-    websocket.enableTrace(False)
-    wsUrl = wsParam.create_url()
-    ws = websocket.WebSocketApp(
-        wsUrl,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws.on_open = on_open
-    ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}, ping_timeout=2)
-
-def command_interface():
-    """命令行界面"""
-    global voice_arm
-    
-    print("\n=== 语音控制机械臂系统 ===")
-    print("可用命令:")
-    print("1. 'start' - 开始语音识别")
-    print("2. 'test' - 测试机械臂动作")
-    print("3. 'reset' - 重置机械臂位置") 
-    print("4. 'audio' - 检测音频设备")
-    print("5. 'actions' - 显示所有可用动作")
-    print("6. 'quit' - 退出系统")
-    print("7. 或直接说出控制指令，如：'准备'、'抓取'、'分拣红色'等")
-    
-    # 首先检测音频设备
-    print("\n正在检测音频设备...")
-    try:
-        devices = get_audio_devices()
-        if devices:
-            print(f"找到 {len(devices)} 个可用音频设备:")
-            for device in devices:
-                print(f"  设备 {device['index']}: {device['name']}")
-            
-            # 测试默认音频设备
-            success, message = test_audio_device()
-            if success:
-                print("✓ 音频设备正常，可以使用语音控制")
-            else:
-                print(f"✗ 音频设备测试失败: {message}")
-                print("建议使用文本输入模式进行测试")
-        else:
-            print("✗ 未找到可用的音频输入设备")
-            print("系统将只支持文本输入模式")
-    except Exception as e:
-        print(f"✗ 音频设备检测失败: {e}")
-        print("系统将只支持文本输入模式")
-    
-    while voice_arm.is_running:
+    def on_message(self, ws, message):
+        """收到语音识别结果的处理 - 意图识别的核心入口"""
         try:
-            cmd = input("\n请输入命令: ").strip()
+            data_json = json.loads(message)
+            code = data_json["code"]
             
-            if cmd == 'quit':
-                print("正在关闭系统...")
-                voice_arm.is_running = False
-                break
+            if code != 0:
+                print(f"🚨 讯飞 API 错误: {data_json.get('message', '未知错误')}")
+            else:
+                ws_data = data_json["data"]["result"]["ws"]
+                final_text = "".join([w["w"] for i in ws_data for w in i["cw"]])
                 
-            elif cmd == 'start':
-                if not voice_arm.is_listening:
-                    print("启动语音识别...")
-                    threading.Thread(target=start_voice_recognition, daemon=True).start()
-                else:
-                    print("语音识别已在运行中")
+                if final_text and final_text not in ['。', '.。', ' .。', ' 。']:
+                    print(f"\n🗣️ 识别结果: {final_text}")
+                    # --- 核心：将 ASR 结果传递给 LangChain Agent ---
+                    self.run_agent_func(final_text)
                     
-            elif cmd == 'test':
-                print("执行测试动作...")
-                voice_arm.action_ready()
-                time.sleep(1)
-                voice_arm.action_grab()
-                time.sleep(1)
-                voice_arm.action_release()
-                voice_arm.action_init()
-                print("测试完成")
-                
-            elif cmd == 'reset':
-                print("重置机械臂位置...")
-                voice_arm.init_arm()
-                
-            elif cmd == 'actions':
-                print("可用动作命令:")
-                for i, action in enumerate(voice_arm.action_commands.keys(), 1):
-                    print(f"  {i:2d}. {action}")
-                
-            elif cmd == 'audio':
-                print("检测音频设备...")
-                try:
-                    devices = get_audio_devices()
-                    if devices:
-                        print(f"找到 {len(devices)} 个音频设备:")
-                        for device in devices:
-                            success, message = test_audio_device(device['index'])
-                            status = "✓" if success else "✗"
-                            print(f"  {status} 设备 {device['index']}: {device['name']} - {message}")
-                    else:
-                        print("未找到音频输入设备")
-                except Exception as e:
-                    print(f"音频设备检测失败: {e}")
-                
-            elif cmd:
-                # 直接处理文本指令
-                print(f"处理指令: {cmd}")
-                action_keyword = understand_command(cmd)
-                execute_command(action_keyword)
-                
-        except KeyboardInterrupt:
-            print("\n检测到中断信号，正在退出...")
-            voice_arm.is_running = False
-            break
         except Exception as e:
-            print(f"命令处理错误: {e}")
+            print(f"🚨 解析语音识别结果时出错: {e}")
+
+    def on_error(self, ws, error):
+        print(f"🚨 WebSocket错误: {error}")
+
+    def on_close(self, ws, close_status_code=None, close_msg=None):
+        print("🔌 语音识别连接已关闭")
+        self.is_listening = False
+        
+    def start_voice_recognition_thread(self):
+        """在独立线程中启动 WebSocket"""
+        if self.is_listening:
+            print("⚠️ 语音识别已在运行中。")
+            return
+            
+        print("🌐 正在连接讯飞语音识别服务...")
+        wsUrl = self.ws_param.create_url()
+        ws = websocket.WebSocketApp(
+            wsUrl,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+        ws.on_open = self.on_open
+        # 使用单独的线程运行，不阻塞主程序
+        threading.Thread(target=ws.run_forever, daemon=True, kwargs={"sslopt": {"cert_reqs": ssl.CERT_NONE}, "ping_timeout": 2}).start()
+
+# =======================================================
+# ========== 主程序与命令行界面 ==========
+# =======================================================
 
 def main():
     """主函数"""
-    global voice_arm
     
+    # 初始化 LLM (请替换为您的真实密钥)
     try:
-        # 初始化系统
-        voice_arm = VoiceControlledArm()
-        
-        # 启动命令界面
-        command_interface()
-        
+        llm = ChatOpenAI(
+            model="deepseek-chat",
+            openai_api_key="",
+            openai_api_base="https://api.deepseek.com",
+            temperature=0
+        )
+        print("✅ LangChain LLM 初始化成功。")
     except Exception as e:
-        print(f"系统启动错误: {e}")
-    finally:
-        # 清理资源
-        if voice_arm:
-            try:
-                del voice_arm.arm
-            except:
-                pass
-        print("系统已关闭")
+        print(f"❌ LangChain LLM 初始化失败，请检查密钥或网络: {e}")
+        return
 
+    # 设置 Agent
+    run_agent_function = setup_langchain_agent(llm, ALL_ARM_TOOLS, RAG_RETRIEVER)
+    
+    # 初始化 ASR 客户端 (包含 LangChain Agent 的调用逻辑)
+    asr_client = ASRClient(run_agent_function)
+    
+    print("\n" + "="*50)
+    print("=== LangChain Agent + RAG + 语音控制系统启动 ===")
+    print("="*50)
+
+    # 命令行界面循环
+    while asr_client.is_running:
+        try:
+            cmd = input("\n请输入命令 ('start' 语音识别, 'quit' 退出): ").strip()
+            
+            if cmd == 'quit':
+                print("正在关闭系统...")
+                asr_client.is_running = False
+                break
+            
+            elif cmd == 'start':
+                asr_client.start_voice_recognition_thread()
+            
+            elif cmd == 'test':
+                print("执行测试动作: 分拣黄色")
+                run_agent_function("请帮我分拣黄色的物品")
+            
+            elif cmd == 'reset':
+                print("重置机械臂位置...")
+                action_init()
+                
+            elif cmd:
+                # 文本指令直接进入 Agent 流程
+                run_agent_function(cmd)
+                
+        except KeyboardInterrupt:
+            print("\n用户中断，系统退出。")
+            asr_client.is_running = False
+            break
+        except Exception as e:
+            print(f"命令处理错误: {e}")
+            
 if __name__ == '__main__':
     main()
